@@ -25,7 +25,9 @@ import {LineChart} from 'react-native-chart-kit';
 
 const UART_SERVICE = '6E400001-B5A3-F393-E0A9-E50E24DCCA9E';
 const UART_CHAR_RX = '6E400003-B5A3-F393-E0A9-E50E24DCCA9E';
-const MAX_HISTORY = 50;
+const MAX_HISTORY = 100;
+
+const COLORS = ['#e6194b', '#3cb44b', '#4363d8', '#f58231'];
 
 const App: React.FC = () => {
   const manager = useRef(new BleManager()).current;
@@ -36,13 +38,12 @@ const App: React.FC = () => {
   const [channels, setChannels] = useState<number[]>([0, 0, 0, 0]);
   const [histories, setHistories] = useState<number[][]>([[], [], [], []]);
   const [count, setCount] = useState(0);
+  const [paused, setPaused] = useState(false);
   const startTimeRef = useRef<number>(Date.now());
 
   useEffect(() => {
     if (Platform.OS === 'android' && Platform.Version >= 23) {
-      PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
-      );
+      PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
     }
   }, []);
 
@@ -71,26 +72,22 @@ const App: React.FC = () => {
       await d.discoverAllServicesAndCharacteristics();
       setConnected(d);
 
-      // reset metrics
       startTimeRef.current = Date.now();
       setCount(0);
       setHistories([[], [], [], []]);
 
-      d.monitorCharacteristicForService(
-        UART_SERVICE,
-        UART_CHAR_RX,
-        (_err, char: Characteristic | null) => {
-          if (!char?.value) return;
-          const raw = Uint8Array.from(atob(char.value), c => c.charCodeAt(0));
-          const dv = new DataView(raw.buffer);
-          const seq = dv.getUint16(0, true);
-          const chans: number[] = [];
-          for (let i = 0; i < 4; i++) {
-            chans.push(dv.getFloat32(2 + i * 4, true));
-          }
-
-          setSequence(seq);
-          setChannels(chans);
+      d.monitorCharacteristicForService(UART_SERVICE, UART_CHAR_RX, (_err, char) => {
+        if (!char?.value) return;
+        const raw = Uint8Array.from(atob(char.value), c => c.charCodeAt(0));
+        const dv = new DataView(raw.buffer);
+        const seq = dv.getUint16(0, true);
+        const chans: number[] = [];
+        for (let i = 0; i < 4; i++) {
+          chans.push(dv.getFloat32(2 + i * 4, true));
+        }
+        setSequence(seq);
+        setChannels(chans);
+        if (!paused) {
           setHistories(hs =>
             hs.map((h, i) => {
               const next = [...h, chans[i]];
@@ -98,29 +95,42 @@ const App: React.FC = () => {
               return next;
             })
           );
-          setCount(c => c + 1);
         }
-      );
+        setCount(c => c + 1);
+      });
     } catch (e: any) {
       Alert.alert('Connection error', e.message);
     }
   };
 
+  const disconnectDevice = async () => {
+    if (connected) {
+      await manager.cancelDeviceConnection(connected.id);
+      setConnected(null);
+      setHistories([[], [], [], []]);
+      setSequence(0);
+      setCount(0);
+    }
+  };
+
+  const clearData = () => {
+    startTimeRef.current = Date.now();
+    setCount(0);
+    setHistories([[], [], [], []]);
+  };
+
   const elapsedSec = (Date.now() - startTimeRef.current) / 1000;
   const speed = elapsedSec > 0 ? count / elapsedSec : 0;
   const screenWidth = Dimensions.get('window').width - 40;
+  const hasCombinedData = histories.some(h => h.length > 1);
 
   if (!connected) {
     return (
       <SafeAreaView style={styles.container}>
-        <Text style={styles.title}>Scan for EEG BLE (Niura)…</Text>
-        <TouchableOpacity
-          style={styles.button}
-          onPress={startScan}
-          disabled={scanning}>
-          {scanning ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Scan</Text>}
+        <Text style={styles.header}>EEGApp • BLE Monitor</Text>
+        <TouchableOpacity style={styles.scanButton} onPress={startScan} disabled={scanning}>
+          {scanning ? <ActivityIndicator color="#fff" /> : <Text style={styles.scanText}>🔍 Scan Devices</Text>}
         </TouchableOpacity>
-
         <FlatList
           data={devices}
           keyExtractor={i => i.id}
@@ -130,7 +140,7 @@ const App: React.FC = () => {
               <Text style={styles.deviceId}>{item.id}</Text>
             </TouchableOpacity>
           )}
-          ListEmptyComponent={!scanning && <Text style={{marginTop: 20}}>No devices found</Text>}
+          ListEmptyComponent={!scanning && <Text style={styles.empty}>No devices found</Text>}
         />
       </SafeAreaView>
     );
@@ -138,27 +148,62 @@ const App: React.FC = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <Text style={styles.title}>Connected: {connected.name}</Text>
-
-      <View style={styles.card}>
-        <Text style={styles.seq}>Seq: {sequence}</Text>
-        {channels.map((v, i) => (
-          <View key={i} style={styles.channelRow}>
-            <Text style={styles.chanLabel}>Ch{i + 1}:</Text>
-            <Text style={styles.chanValue}>{v.toFixed(2)} µV</Text>
-          </View>
-        ))}
+      <Text style={styles.header}>Connected: {connected.name}</Text>
+      <View style={styles.infoRow}>
+        <Text style={styles.info}>Seq: {sequence}</Text>
+        <Text style={styles.info}>Speed: {speed.toFixed(1)} seg/s</Text>
+      </View>
+      <View style={styles.buttonRow}>
+        <TouchableOpacity style={styles.btn} onPress={() => setPaused(!paused)}>
+          <Text style={styles.btnText}>{paused ? '▶️ Resume' : '⏸ Pause'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.btn} onPress={clearData}>
+          <Text style={styles.btnText}>🗑 Clear</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.btn} onPress={disconnectDevice}>
+          <Text style={styles.btnText}>🔌 Disconnect</Text>
+        </TouchableOpacity>
       </View>
 
-      <ScrollView style={{flex: 1}}>
+      <ScrollView style={styles.scroll}>
+        {/* Combined chart */}
+        <Text style={styles.chartTitle}>Combined Channels</Text>
+        {hasCombinedData ? (
+          <LineChart
+            data={{
+              datasets: histories.map((hist, i) => ({
+                data: hist,
+                color: () => COLORS[i],
+                strokeWidth: 2,
+              })),
+            }}
+            width={screenWidth}
+            height={220}
+            withDots={false}
+            withInnerLines={false}
+            withOuterLines={false}
+            chartConfig={{
+              backgroundGradientFrom: '#fff',
+              backgroundGradientTo: '#fff',
+              decimalPlaces: 2,
+              propsForBackgroundLines: {stroke: '#eee'},
+              color: opacity => `rgba(0,0,0,${opacity})`,
+            }}
+            style={styles.combinedChart}
+          />
+        ) : (
+          <Text style={styles.waiting}>Waiting for data…</Text>
+        )}
+
+        {/* Individual trends */}
         {histories.map((hist, i) => {
           const hasData = hist.length > 1;
           return (
-            <View key={i} style={{marginBottom: 24}}>
-              <Text style={styles.chartTitle}>Channel {i + 1} Trend</Text>
+            <View key={i} style={styles.singleChartBlock}>
+              <Text style={styles.chartTitle}>Channel {i + 1}</Text>
               {hasData ? (
                 <LineChart
-                  data={{datasets: [{data: hist, strokeWidth: 2}]}}
+                  data={{datasets: [{data: hist, color: () => COLORS[i]}]}}
                   width={screenWidth}
                   height={120}
                   withDots={false}
@@ -168,59 +213,48 @@ const App: React.FC = () => {
                     backgroundGradientFrom: '#f4f6fc',
                     backgroundGradientTo: '#f4f6fc',
                     decimalPlaces: 2,
+                    color: () => COLORS[i],
                     propsForBackgroundLines: {stroke: '#eee'},
-                    color: () => '#5568f6',
                   }}
-                  style={{borderRadius: 8}}
+                  style={styles.singleChart}
                 />
               ) : (
-                <Text style={{textAlign: 'center', color: '#666', marginTop: 12}}>
-                  Waiting for data…
-                </Text>
+                <Text style={styles.waiting}>Waiting for data…</Text>
               )}
             </View>
           );
         })}
       </ScrollView>
-
-      <View style={styles.footer}>
-        <Text style={styles.speed}>Speed: {speed.toFixed(1)} segments/sec</Text>
-      </View>
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {flex: 1, padding: 20, backgroundColor: '#fff'},
-  title: {fontSize: 20, fontWeight: '600', marginBottom: 12},
-  button: {
+  container: {flex: 1, backgroundColor: '#f0f4f8'},
+  header: {fontSize: 22, fontWeight: '700', textAlign: 'center', margin: 16},
+  scanButton: {
     backgroundColor: '#5568f6',
+    marginHorizontal: 40,
     padding: 12,
-    borderRadius: 8,
+    borderRadius: 24,
     alignItems: 'center',
   },
-  buttonText: {color: '#fff', fontSize: 16},
-  deviceItem: {padding: 12, borderBottomWidth: 1, borderColor: '#ddd'},
+  scanText: {color: '#fff', fontSize: 16},
+  empty: {textAlign: 'center', marginTop: 24, color: '#666'},
+  deviceItem: {padding: 12, marginHorizontal: 20, borderBottomWidth: 1, borderColor: '#dde3ea'},
   deviceName: {fontSize: 16, fontWeight: '500'},
-  deviceId: {fontSize: 12, color: '#666'},
-  card: {
-    backgroundColor: '#f9faff',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: {width: 0, height: 4},
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    elevation: 2,
-  },
-  seq: {fontSize: 18, fontWeight: '600', marginBottom: 8},
-  channelRow: {flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4},
-  chanLabel: {fontSize: 16},
-  chanValue: {fontSize: 16, fontWeight: '500'},
-  chartTitle: {fontSize: 16, fontWeight: '500', marginBottom: 8, textAlign: 'center'},
-  footer: {marginTop: 12, alignItems: 'center'},
-  speed: {fontSize: 16, fontWeight: '500'},
+  deviceId: {fontSize: 12, color: '#888'},
+  infoRow: {flexDirection: 'row', justifyContent: 'space-around', marginVertical: 12},
+  info: {fontSize: 16, fontWeight: '600'},
+  buttonRow: {flexDirection: 'row', justifyContent: 'space-around', marginVertical: 8},
+  btn: {backgroundColor: '#fff', padding: 10, borderRadius: 20, elevation: 2},
+  btnText: {fontSize: 14, fontWeight: '600'},
+  scroll: {flex: 1, paddingHorizontal: 20},
+  chartTitle: {fontSize: 16, fontWeight: '600', marginBottom: 6, textAlign: 'center'},
+  combinedChart: {borderRadius: 12, backgroundColor: '#fff', marginBottom: 24},
+  singleChartBlock: {marginBottom: 20},
+  singleChart: {borderRadius: 8, backgroundColor: '#fff'},
+  waiting: {textAlign: 'center', color: '#666', marginVertical: 12},
 });
 
 export default App;
