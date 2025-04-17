@@ -19,14 +19,15 @@ import {
   Alert,
   ActivityIndicator,
   Dimensions,
+  Modal,
 } from 'react-native';
 import {BleManager, Device, Characteristic} from 'react-native-ble-plx';
 import {LineChart} from 'react-native-chart-kit';
+import {Ionicons} from '@expo/vector-icons';
 
 const UART_SERVICE = '6E400001-B5A3-F393-E0A9-E50E24DCCA9E';
 const UART_CHAR_RX = '6E400003-B5A3-F393-E0A9-E50E24DCCA9E';
 const MAX_HISTORY = 100;
-
 const COLORS = ['#e6194b', '#3cb44b', '#4363d8', '#f58231'];
 
 const App: React.FC = () => {
@@ -39,6 +40,8 @@ const App: React.FC = () => {
   const [histories, setHistories] = useState<number[][]>([[], [], [], []]);
   const [count, setCount] = useState(0);
   const [paused, setPaused] = useState(false);
+  const [expanded, setExpanded] = useState<boolean[]>([false, false, false, false]);
+  const [zoom, setZoom] = useState(false);
   const startTimeRef = useRef<number>(Date.now());
 
   useEffect(() => {
@@ -71,11 +74,9 @@ const App: React.FC = () => {
       const d = await manager.connectToDevice(device.id);
       await d.discoverAllServicesAndCharacteristics();
       setConnected(d);
-
       startTimeRef.current = Date.now();
       setCount(0);
       setHistories([[], [], [], []]);
-
       d.monitorCharacteristicForService(UART_SERVICE, UART_CHAR_RX, (_err, char) => {
         if (!char?.value) return;
         const raw = Uint8Array.from(atob(char.value), c => c.charCodeAt(0));
@@ -122,7 +123,6 @@ const App: React.FC = () => {
   const elapsedSec = (Date.now() - startTimeRef.current) / 1000;
   const speed = elapsedSec > 0 ? count / elapsedSec : 0;
   const screenWidth = Dimensions.get('window').width - 40;
-  const hasCombinedData = histories.some(h => h.length > 1);
 
   if (!connected) {
     return (
@@ -166,22 +166,16 @@ const App: React.FC = () => {
       </View>
 
       <ScrollView style={styles.scroll}>
-        {/* Combined chart */}
-        <Text style={styles.chartTitle}>Combined Channels</Text>
-        {hasCombinedData ? (
+        {/* Combined chart with zoom */}
+        <TouchableOpacity onPress={() => setZoom(true)}>
+          <Text style={styles.chartTitle}>Combined Channels (Tap to Zoom)</Text>
           <LineChart
             data={{
-              datasets: histories.map((hist, i) => ({
-                data: hist,
-                color: () => COLORS[i],
-                strokeWidth: 2,
-              })),
+              datasets: histories.map((hist, i) => ({data: hist, color: () => COLORS[i], strokeWidth: 2})),
             }}
             width={screenWidth}
-            height={220}
+            height={200}
             withDots={false}
-            withInnerLines={false}
-            withOuterLines={false}
             chartConfig={{
               backgroundGradientFrom: '#fff',
               backgroundGradientTo: '#fff',
@@ -191,40 +185,73 @@ const App: React.FC = () => {
             }}
             style={styles.combinedChart}
           />
-        ) : (
-          <Text style={styles.waiting}>Waiting for data…</Text>
-        )}
+        </TouchableOpacity>
 
-        {/* Individual trends */}
+        {/* Individual charts with dropdown */}
         {histories.map((hist, i) => {
           const hasData = hist.length > 1;
           return (
-            <View key={i} style={styles.singleChartBlock}>
-              <Text style={styles.chartTitle}>Channel {i + 1}</Text>
-              {hasData ? (
-                <LineChart
-                  data={{datasets: [{data: hist, color: () => COLORS[i]}]}}
-                  width={screenWidth}
-                  height={120}
-                  withDots={false}
-                  withInnerLines={false}
-                  withOuterLines={false}
-                  chartConfig={{
-                    backgroundGradientFrom: '#f4f6fc',
-                    backgroundGradientTo: '#f4f6fc',
-                    decimalPlaces: 2,
-                    color: () => COLORS[i],
-                    propsForBackgroundLines: {stroke: '#eee'},
-                  }}
-                  style={styles.singleChart}
-                />
-              ) : (
-                <Text style={styles.waiting}>Waiting for data…</Text>
+            <View key={i} style={styles.singleBlock}>
+              <View style={styles.singleHeader}>
+                <Text style={styles.singleTitle}>Ch{i + 1}: {channels[i].toFixed(2)} µV</Text>
+                <TouchableOpacity onPress={() => {
+                  const arr = [...expanded]; arr[i] = !arr[i]; setExpanded(arr);
+                }}>
+                  <Ionicons
+                    name={expanded[i] ? 'chevron-up' : 'chevron-down'}
+                    size={20}
+                    color='#333'
+                  />
+                </TouchableOpacity>
+              </View>
+              {expanded[i] && (
+                hasData ? (
+                  <LineChart
+                    data={{datasets: [{data: hist, color: () => COLORS[i]}]}}
+                    width={screenWidth}
+                    height={120}
+                    withDots={false}
+                    chartConfig={{
+                      backgroundGradientFrom: '#f4f6fc',
+                      backgroundGradientTo: '#f4f6fc',
+                      decimalPlaces: 2,
+                      color: () => COLORS[i],
+                      propsForBackgroundLines: {stroke: '#eee'},
+                    }}
+                    style={styles.singleChart}
+                  />
+                ) : (
+                  <Text style={styles.waiting}>Waiting for data…</Text>
+                )
               )}
             </View>
           );
         })}
       </ScrollView>
+
+      {/* Zoom modal */}
+      <Modal visible={zoom} animationType='slide'>
+        <SafeAreaView style={styles.zoomContainer}>
+          <TouchableOpacity style={styles.zoomClose} onPress={() => setZoom(false)}>
+            <Ionicons name='close' size={28} color='#000' />
+          </TouchableOpacity>
+          <Text style={styles.chartTitle}>Combined Channels (Zoomed)</Text>
+          <LineChart
+            data={{datasets: histories.map((hist, i) => ({data: hist, color: () => COLORS[i], strokeWidth: 2}))}}
+            width={Dimensions.get('window').width - 20}
+            height={Dimensions.get('window').height * 0.6}
+            withDots={false}
+            chartConfig={{
+              backgroundGradientFrom: '#fff',
+              backgroundGradientTo: '#fff',
+              decimalPlaces: 2,
+              propsForBackgroundLines: {stroke: '#eee'},
+              color: opacity => `rgba(0,0,0,${opacity})`,
+            }}
+            style={styles.zoomChart}
+          />
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -232,13 +259,7 @@ const App: React.FC = () => {
 const styles = StyleSheet.create({
   container: {flex: 1, backgroundColor: '#f0f4f8'},
   header: {fontSize: 22, fontWeight: '700', textAlign: 'center', margin: 16},
-  scanButton: {
-    backgroundColor: '#5568f6',
-    marginHorizontal: 40,
-    padding: 12,
-    borderRadius: 24,
-    alignItems: 'center',
-  },
+  scanButton: {backgroundColor: '#5568f6', marginHorizontal: 40, padding: 12, borderRadius: 24, alignItems: 'center'},
   scanText: {color: '#fff', fontSize: 16},
   empty: {textAlign: 'center', marginTop: 24, color: '#666'},
   deviceItem: {padding: 12, marginHorizontal: 20, borderBottomWidth: 1, borderColor: '#dde3ea'},
@@ -252,9 +273,14 @@ const styles = StyleSheet.create({
   scroll: {flex: 1, paddingHorizontal: 20},
   chartTitle: {fontSize: 16, fontWeight: '600', marginBottom: 6, textAlign: 'center'},
   combinedChart: {borderRadius: 12, backgroundColor: '#fff', marginBottom: 24},
-  singleChartBlock: {marginBottom: 20},
-  singleChart: {borderRadius: 8, backgroundColor: '#fff'},
+  singleBlock: {marginBottom: 20, backgroundColor: '#fff', borderRadius: 8, padding: 8, elevation: 1},
+  singleHeader: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'},
+  singleTitle: {fontSize: 14, fontWeight: '600'},
+  singleChart: {borderRadius: 8, backgroundColor: '#fff', marginTop: 6},
   waiting: {textAlign: 'center', color: '#666', marginVertical: 12},
+  zoomContainer: {flex: 1, backgroundColor: '#fff', alignItems: 'center', padding: 10},
+  zoomClose: {alignSelf: 'flex-end', margin: 10},
+  zoomChart: {borderRadius: 12, backgroundColor: '#fff'},
 });
 
 export default App;
